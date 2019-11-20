@@ -162,7 +162,7 @@ public class MagicHandler {
         // 如果是无参函数，直接从数据源加载数据，并写入缓存
         if (parameterTypes.length == 0) {
             Object newValue = this.cacheHandler.getData(pjp, null);
-            writeMagicCache(newValue, null);
+            writeMagicCache(newValue, null,new HashMap<>());
             return newValue;
         }
         Map<CacheKeyTO, Object> keyArgMap = getCacheKeyForMagic();
@@ -174,15 +174,32 @@ public class MagicHandler {
         }
         Type returnItemType = getRealReturnType();
         Map<CacheKeyTO, CacheWrapper<Object>> cacheValues = this.cacheHandler.mget(method, returnItemType, keyArgMap.keySet());
-        // 如果所有key都已经命中
+    	 // 如果所有key都已经命中
         int argSize = keyArgMap.size() - cacheValues.size();
         if (argSize <= 0) {
             return convertToReturnObject(cacheValues, null, Collections.emptyMap());
         }
+        Map<CacheKeyTO, MSetParam> unmatchCache = new HashMap<>(argSize);
+        Iterator<Map.Entry<CacheKeyTO, Object>> keyArgMapIt = keyArgMap.entrySet().iterator();
+        if (null != iterableCollectionArg) {
+            while (keyArgMapIt.hasNext()) {
+                Map.Entry<CacheKeyTO, Object> item = keyArgMapIt.next();
+                if (!cacheValues.containsKey(item.getKey())) {
+                    unmatchCache.put(item.getKey(), new MSetParam(item.getKey(), null));
+                }
+            }
+        } else {
+            while (keyArgMapIt.hasNext()) {
+                Map.Entry<CacheKeyTO, Object> item = keyArgMapIt.next();
+                if (!cacheValues.containsKey(item.getKey())) {
+                    unmatchCache.put(item.getKey(), new MSetParam(item.getKey(), null));
+                }
+            }
+        }
         Object[] args = getUnmatchArg(keyArgMap, cacheValues, argSize);
         Object newValue = this.cacheHandler.getData(pjp, args);
         args[iterableArgIndex] = null;
-        Map<CacheKeyTO, MSetParam> unmatchCache = writeMagicCache(newValue, args);
+        writeMagicCache(newValue, args,unmatchCache);
         return convertToReturnObject(cacheValues, newValue, unmatchCache);
     }
 
@@ -240,27 +257,42 @@ public class MagicHandler {
      * @return
      * @throws Exception
      */
-    private Map<CacheKeyTO, MSetParam> writeMagicCache(Object newValue, Object[] args) throws Exception {
+    private Map<CacheKeyTO, MSetParam> writeMagicCache(Object newValue, Object[] args,Map<CacheKeyTO, MSetParam> unmatchCache) throws Exception {
         if (null == newValue) {
             return Collections.emptyMap();
         }
-        Map<CacheKeyTO, MSetParam> unmatchCache;
+        //Map<CacheKeyTO, MSetParam> unmatchCache;
         if (newValue.getClass().isArray()) {
             Object[] newValues = (Object[]) newValue;
-            unmatchCache = new HashMap<>(newValues.length);
+            //unmatchCache = new HashMap<>(newValues.length);
             for (Object value : newValues) {
                 MSetParam mSetParam = genCacheWrapper(value, args);
                 unmatchCache.put(mSetParam.getCacheKey(), mSetParam);
             }
         } else if (newValue instanceof Collection) {
             Collection<Object> newValues = (Collection<Object>) newValue;
-            unmatchCache = new HashMap<>(newValues.size());
+            //unmatchCache = new HashMap<>(newValues.size());
             for (Object value : newValues) {
                 MSetParam mSetParam = genCacheWrapper(value, args);
                 unmatchCache.put(mSetParam.getCacheKey(), mSetParam);
             }
         } else {
             throw new Exception("Magic模式返回值，只允许是数组或Collection类型的");
+        }
+        Iterator<Map.Entry<CacheKeyTO, MSetParam>> unmatchCacheIt = unmatchCache.entrySet().iterator();
+        while (unmatchCacheIt.hasNext()) {
+            Map.Entry<CacheKeyTO, MSetParam> entry = unmatchCacheIt.next();
+            MSetParam param = entry.getValue();
+            CacheWrapper<Object> cacheWrapper = param.getResult();
+            if (cacheWrapper == null) {
+                cacheWrapper = new CacheWrapper<>();
+                param.setResult(cacheWrapper);
+            }
+            int expire = this.cacheHandler.getScriptParser().getRealExpire(cache.expire(), cache.expireExpression(), args, cacheWrapper.getCacheObject());
+            cacheWrapper.setExpire(expire);
+            if (expire < 0) {
+                unmatchCacheIt.remove();
+            }
         }
         if (null != unmatchCache && unmatchCache.size() > 0) {
             this.cacheHandler.mset(pjp.getMethod(), unmatchCache.values());
